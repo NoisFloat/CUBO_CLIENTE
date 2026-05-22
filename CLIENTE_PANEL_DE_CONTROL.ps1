@@ -1,246 +1,513 @@
-# CLIENTE_PANEL_DE_CONTROL_OPENSSH.ps1
-# Ejecutar en PowerShell como Administrador.
-# Windows 10 / Windows 11.
-# Configura OpenSSH Server para aceptar SOLO autenticación por llave pública.
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Configura OpenSSH Server en Windows para acceso por llave pública.
+
+.DESCRIPTION
+    - Instala OpenSSH Server si falta.
+    - Crea/actualiza administrators_authorized_keys para usuarios administradores.
+    - Opcionalmente crea authorized_keys para usuario no administrador.
+    - Aplica ACLs estrictas.
+    - Genera backup de sshd_config.
+    - Valida la configuración antes de aplicarla.
+    - Configura firewall con restricción opcional por IP/red.
+    - Reinicia sshd solo si la configuración es válida.
+
+.EXAMPLE
+    .\CLIENTE_PANEL_DE_CONTROL_OPENSSH_ROBUSTO.ps1 `
+        -PublicKeyPath "C:\Temp\id_rsa.pub" `
+        -AllowedRemoteAddress "192.168.1.0/24"
+
+.EXAMPLE
+    .\CLIENTE_PANEL_DE_CONTROL_OPENSSH_ROBUSTO.ps1 `
+        -PublicKey "ssh-rsa AAAA..." `
+        -AllowedRemoteAddress "192.168.1.50"
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$PublicKey,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PublicKeyPath,
+
+    [Parameter(Mandatory = $false)]
+    [int]$Port = 22,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$AllowedRemoteAddress = @("LocalSubnet"),
+
+    [Parameter(Mandatory = $false)]
+    [string]$TargetUser = $env:USERNAME,
+
+    [Parameter(Mandatory = $false)]
+    [string]$TargetUserProfile = $env:USERPROFILE,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AlsoConfigureUserAuthorizedKeys,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowPasswordFallbackForFirstRun
+)
 
 $ErrorActionPreference = "Stop"
 
 # ============================================================
-# 1. Llave pública autorizada
-# Esta debe coincidir con:
-# ssh-keygen -y -f ~/Programming/PanelDeControlCubo/Servicios/id_rsa
+# Funciones auxiliares
 # ============================================================
 
-$PublicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCquPxv3J0kvfUFaTI7muUV5ovGSOk8YVdsKUU3KcW8ZiNU/hQag1p2/oFEZlTxum8oPhKIYdwRL/t12Y+IJrYwlKDyxHGA8zJ9z7JL5YXkn9k3T+j7ArkxJh6Mv45EMb0Cx/td07mS2FtLGwjX1i/E3s/0pAxriiBlcX+8VqcMp6WGCnIRDVeCCOr8APp3ZvWuxL5bj1NIBuPsAL7vVDW2eL9mWIu64AvzI0tFFaraFv4iDSzzcJefreKLj0lnYnaGWfe/Ev7hN7h/S9HsTXlIcOJhGRETvwGDymwdSbmwj61KD3N6OEsRHJ2zb6+Zx5v7X7tU+69Ah06CQNHFSd4Ik1KKjoRUiXrkZe0Jkaq07Qx8bnFVCKMC8HiXTyOIH7IptuvI5j4cz8F3E5VVYUyUEGpJUA9xmJvoMFQX1joLyvZM2GF7MtpONfPmM15tKFcCd3QrRWWqfOx9tNaQPWDiyjY2hkO8NtAAvk/xp72cYJTrj7jCAE8KvxVtdZPxOjw6PZEhK88Oarg9j+yp87xVkvPYe2QgbHjD4nkB2jdxVM9iBYJVjO/SeUbb32V3MlD6uZLLfw0dlZJBYCH8PiFSQ8gJwqfMUvfGxx96D3TeL7BZbYMd/S/Mv9WR6qnnVUqBSUxXXUTtPsEUo5GsDnfje+kBa8WNbJ1ZHk/rv6uPeQ=="
+function Write-Step {
+    param([string]$Message)
+    Write-Host ""
+    Write-Host "==> $Message" -ForegroundColor Cyan
+}
 
-# ============================================================
-# 2. Validar que el script corre como Administrador
-# ============================================================
+function Write-Ok {
+    param([string]$Message)
+    Write-Host "OK: $Message" -ForegroundColor Green
+}
 
-$IsAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+function Write-Warn {
+    param([string]$Message)
+    Write-Host "ADVERTENCIA: $Message" -ForegroundColor Yellow
+}
 
-if (-not $IsAdmin) {
-    Write-Host "ERROR: Ejecuta PowerShell como Administrador." -ForegroundColor Red
-    exit 1
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string]$ErrorMessage = "Comando nativo falló."
+    )
+
+    & $FilePath @Arguments
+    $exit = $LASTEXITCODE
+
+    if ($exit -ne 0) {
+        throw "$ErrorMessage Código de salida: $exit. Comando: $FilePath $($Arguments -join ' ')"
+    }
+}
+
+function Normalize-PublicKey {
+    param([string]$Key)
+
+    $clean = ($Key -replace "`r", "" -replace "`n", "").Trim()
+
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        throw "La llave pública está vacía."
+    }
+
+    $validKeyPattern = '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)\s+[A-Za-z0-9+/=]+(\s+.*)?$'
+
+    if ($clean -notmatch $validKeyPattern) {
+        throw "La llave pública no parece tener formato OpenSSH válido. Debe empezar con ssh-rsa, ssh-ed25519 o ecdsa-sha2-*."
+    }
+
+    return $clean
+}
+
+function Set-StrictAclForAdminKeys {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        throw "No existe el archivo para aplicar ACL: $Path"
+    }
+
+    # SYSTEM = S-1-5-18
+    # BUILTIN\Administrators = S-1-5-32-544
+    takeown /f $Path /a | Out-Null
+
+    icacls $Path /inheritance:r | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "No se pudo desactivar herencia en $Path"
+    }
+
+    icacls $Path /remove:g "Users" "Authenticated Users" "Everyone" "Todos" "Usuarios" 2>$null | Out-Null
+
+    icacls $Path /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "No se pudieron aplicar permisos estrictos a $Path"
+    }
+}
+
+function Set-StrictAclForUserKeys {
+    param(
+        [string]$Path,
+        [string]$UserName
+    )
+
+    if (-not (Test-Path $Path)) {
+        throw "No existe el archivo para aplicar ACL: $Path"
+    }
+
+    $acl = Get-Acl -Path $Path
+    $acl.SetAccessRuleProtection($true, $false)
+
+    foreach ($rule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRule($rule)
+    }
+
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
+
+    try {
+        if ($UserName -eq $env:USERNAME) {
+            $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        }
+        else {
+            $account = New-Object System.Security.Principal.NTAccount($UserName)
+            $userSid = $account.Translate([System.Security.Principal.SecurityIdentifier])
+        }
+    }
+    catch {
+        throw "No se pudo resolver el SID del usuario '$UserName'. Usa -TargetUserProfile y verifica el nombre del usuario."
+    }
+
+    $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+    $propagation = [System.Security.AccessControl.PropagationFlags]::None
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($userSid, $rights, $inheritance, $propagation, $allow)))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, $rights, $inheritance, $propagation, $allow)))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid,  $rights, $inheritance, $propagation, $allow)))
+
+    Set-Acl -Path $Path -AclObject $acl
+}
+
+function Ensure-Directory {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
 }
 
 # ============================================================
-# 3. Datos reales de esta máquina
+# 1. Validación de entrada
 # ============================================================
 
-$ComputerName = $env:COMPUTERNAME
-$UserName     = $env:USERNAME
-$UserProfile  = $env:USERPROFILE
+Write-Step "Validando parámetros"
 
-Write-Host "Equipo:  $ComputerName" -ForegroundColor Cyan
-Write-Host "Usuario: $UserName" -ForegroundColor Cyan
-Write-Host "Perfil:  $UserProfile" -ForegroundColor Cyan
-Write-Host ""
+if ([string]::IsNullOrWhiteSpace($PublicKey) -and [string]::IsNullOrWhiteSpace($PublicKeyPath)) {
+    throw "Debes indicar -PublicKey o -PublicKeyPath."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($PublicKeyPath)) {
+    if (-not (Test-Path $PublicKeyPath)) {
+        throw "No existe el archivo de llave pública: $PublicKeyPath"
+    }
+
+    $PublicKey = Get-Content -Path $PublicKeyPath -Raw
+}
+
+$PublicKey = Normalize-PublicKey -Key $PublicKey
+
+if ($Port -lt 1 -or $Port -gt 65535) {
+    throw "Puerto inválido: $Port"
+}
+
+Write-Ok "Parámetros validados"
+Write-Host "Equipo:  $env:COMPUTERNAME"
+Write-Host "Usuario: $TargetUser"
+Write-Host "Perfil:  $TargetUserProfile"
+Write-Host "Puerto:  $Port"
+Write-Host "Origen permitido firewall: $($AllowedRemoteAddress -join ', ')"
 
 # ============================================================
-# 4. Instalar OpenSSH Server si falta
+# 2. Rutas principales
 # ============================================================
 
-$ServerCapability = Get-WindowsCapability -Online |
-    Where-Object Name -like "OpenSSH.Server*"
+$SshDir      = Join-Path $env:ProgramData "ssh"
+$SshdConfig  = Join-Path $SshDir "sshd_config"
+$AdminKeys   = Join-Path $SshDir "administrators_authorized_keys"
+$SshdExe     = Join-Path $env:WINDIR "System32\OpenSSH\sshd.exe"
+$SshKeygen   = Join-Path $env:WINDIR "System32\OpenSSH\ssh-keygen.exe"
+$FirewallRuleName = "OpenSSH-Server-In-TCP"
 
-if ($ServerCapability.State -ne "Installed") {
-    Write-Host "Instalando OpenSSH Server..." -ForegroundColor Yellow
-    Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-} else {
-    Write-Host "OpenSSH Server ya esta instalado." -ForegroundColor Green
+Ensure-Directory -Path $SshDir
+
+# ============================================================
+# 3. Instalar OpenSSH Server si falta
+# ============================================================
+
+Write-Step "Verificando OpenSSH Server"
+
+$serverCapability = Get-WindowsCapability -Online |
+    Where-Object { $_.Name -like "OpenSSH.Server*" } |
+    Select-Object -First 1
+
+if ($null -eq $serverCapability) {
+    throw "No se encontró la capability OpenSSH.Server en este Windows. Revisa que el sistema soporte OpenSSH como característica opcional."
+}
+
+if ($serverCapability.State -ne "Installed") {
+    Write-Warn "OpenSSH Server no está instalado. Instalando..."
+    Add-WindowsCapability -Online -Name $serverCapability.Name | Out-Null
+    Write-Ok "OpenSSH Server instalado"
+}
+else {
+    Write-Ok "OpenSSH Server ya estaba instalado"
+}
+
+if (-not (Test-Path $SshdExe)) {
+    throw "No se encontró sshd.exe en: $SshdExe"
 }
 
 # ============================================================
-# 5. Rutas usadas por Windows OpenSSH
+# 4. Generar host keys si faltan
 # ============================================================
 
-$SshDir     = Join-Path $env:ProgramData "ssh"
-$SshdConfig = Join-Path $SshDir "sshd_config"
-$AdminKeys  = Join-Path $SshDir "administrators_authorized_keys"
-$SshdExe    = Join-Path $env:WINDIR "System32\OpenSSH\sshd.exe"
+Write-Step "Verificando llaves host de OpenSSH"
 
-New-Item -ItemType Directory -Path $SshDir -Force | Out-Null
+if (Test-Path $SshKeygen) {
+    & $SshKeygen -A | Out-Null
+    Write-Ok "Host keys verificadas/generadas"
+}
+else {
+    Write-Warn "No se encontró ssh-keygen.exe. Se continuará, pero sshd podría generar llaves al iniciar."
+}
 
 # ============================================================
-# 6. Crear administrators_authorized_keys
-# Para usuarios administradores, Windows OpenSSH usa este archivo.
+# 5. Configurar llave para usuarios administradores
 # ============================================================
 
-Write-Host "Escribiendo llave publica en $AdminKeys" -ForegroundColor Yellow
+Write-Step "Configurando administrators_authorized_keys"
 
 Set-Content -Path $AdminKeys -Value $PublicKey -Encoding ascii -Force
+Set-StrictAclForAdminKeys -Path $AdminKeys
+
+Write-Ok "Llave pública instalada en $AdminKeys"
+Write-Ok "ACL estricta aplicada a administrators_authorized_keys"
 
 # ============================================================
-# 7. Aplicar ACL estrictas
-# Deben quedar solo Administradores y SYSTEM.
-# Se intenta por SID y por nombres ingles/español.
+# 6. Opcional: configurar authorized_keys del usuario
+#    Útil para usuarios NO administradores.
 # ============================================================
 
-Write-Host "Configurando permisos del archivo de llaves..." -ForegroundColor Yellow
+if ($AlsoConfigureUserAuthorizedKeys) {
+    Write-Step "Configurando authorized_keys del usuario"
 
-takeown /f $AdminKeys /a | Out-Null
-icacls $AdminKeys /inheritance:r | Out-Null
-
-$AdminIdentities = @(
-    "*S-1-5-32-544",           # SID universal de BUILTIN\Administrators / Administradores
-    "BUILTIN\Administrators",
-    "BUILTIN\Administradores",
-    "Administrators",
-    "Administradores"
-)
-
-$SystemIdentities = @(
-    "*S-1-5-18",               # SID universal de LOCAL SYSTEM
-    "NT AUTHORITY\SYSTEM",
-    "SYSTEM"
-)
-
-$AdminAclOk = $false
-foreach ($Identity in $AdminIdentities) {
-    icacls $AdminKeys /grant:r "$Identity`:F" | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Permiso Administradores aplicado con: $Identity" -ForegroundColor Green
-        $AdminAclOk = $true
-        break
+    if ([string]::IsNullOrWhiteSpace($TargetUserProfile) -or -not (Test-Path $TargetUserProfile)) {
+        throw "No existe el perfil del usuario: $TargetUserProfile"
     }
-}
 
-$SystemAclOk = $false
-foreach ($Identity in $SystemIdentities) {
-    icacls $AdminKeys /grant:r "$Identity`:F" | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Permiso SYSTEM aplicado con: $Identity" -ForegroundColor Green
-        $SystemAclOk = $true
-        break
-    }
-}
+    $UserSshDir = Join-Path $TargetUserProfile ".ssh"
+    $UserKeys   = Join-Path $UserSshDir "authorized_keys"
 
-if (-not $AdminAclOk) {
-    throw "No se pudo aplicar permiso de Administradores al archivo $AdminKeys"
-}
+    Ensure-Directory -Path $UserSshDir
+    Set-Content -Path $UserKeys -Value $PublicKey -Encoding ascii -Force
 
-if (-not $SystemAclOk) {
-    throw "No se pudo aplicar permiso de SYSTEM al archivo $AdminKeys"
+    Set-StrictAclForUserKeys -Path $UserKeys -UserName $TargetUser
+
+    Write-Ok "Llave pública instalada en $UserKeys"
+    Write-Ok "ACL estricta aplicada a authorized_keys del usuario"
 }
 
 # ============================================================
-# 8. Activar servicio sshd
+# 7. Crear configuración sshd_config segura en archivo temporal
 # ============================================================
 
-Write-Host "Activando servicio sshd..." -ForegroundColor Yellow
+Write-Step "Preparando sshd_config"
 
-Set-Service -Name sshd -StartupType Automatic
-Start-Service sshd -ErrorAction SilentlyContinue
+$PasswordAuthentication = if ($AllowPasswordFallbackForFirstRun) { "yes" } else { "no" }
 
-# ============================================================
-# 9. Habilitar firewall para puerto 22
-# ============================================================
-
-Write-Host "Configurando firewall para puerto 22..." -ForegroundColor Yellow
-
-$FirewallRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
-
-if ($null -eq $FirewallRule) {
-    New-NetFirewallRule `
-        -Name "OpenSSH-Server-In-TCP" `
-        -DisplayName "OpenSSH Server (sshd)" `
-        -Enabled True `
-        -Direction Inbound `
-        -Protocol TCP `
-        -LocalPort 22 `
-        -Action Allow | Out-Null
-} else {
-    Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" | Out-Null
+if ($AllowPasswordFallbackForFirstRun) {
+    Write-Warn "PasswordAuthentication quedará ACTIVADO temporalmente por -AllowPasswordFallbackForFirstRun."
+    Write-Warn "Después de probar la llave, ejecuta de nuevo sin ese parámetro para dejar solo llave pública."
 }
 
-# ============================================================
-# 10. Configurar sshd_config
-# Se deja solo llave pública.
-# PasswordAuthentication queda apagado.
-# El bloque Match Group administrators debe ir al final.
-# ============================================================
+$GeneratedConfig = @"
+# sshd_config generado por CLIENTE_PANEL_DE_CONTROL_OPENSSH_ROBUSTO.ps1
+# Fecha: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 
-Write-Host "Configurando sshd_config..." -ForegroundColor Yellow
-
-if (-not (Test-Path $SshdConfig)) {
-    New-Item -ItemType File -Path $SshdConfig -Force | Out-Null
-}
-
-$Backup = "$SshdConfig.bak_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-Copy-Item $SshdConfig $Backup -Force
-
-$SshdConfigContent = @"
-# sshd_config generado por CLIENTE_PANEL_DE_CONTROL_OPENSSH.ps1
-
-Port 22
+Port $Port
 AddressFamily any
+ListenAddress 0.0.0.0
 
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
 
-PasswordAuthentication no
+PasswordAuthentication $PasswordAuthentication
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 
+PermitRootLogin no
+StrictModes yes
+
 Subsystem sftp sftp-server.exe
 
-Match Group administrators
+# IMPORTANTE:
+# Este bloque debe permanecer al final.
+# Para usuarios administradores, Windows OpenSSH usa administrators_authorized_keys.
+Match Group administrators,administradores
        AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
 "@
 
-Set-Content -Path $SshdConfig -Value $SshdConfigContent -Encoding ascii
+$TempConfig = Join-Path $env:TEMP "sshd_config_test_$(Get-Date -Format 'yyyyMMdd_HHmmss').tmp"
+Set-Content -Path $TempConfig -Value $GeneratedConfig -Encoding ascii -Force
 
-# ============================================================
-# 11. Validar configuración antes de reiniciar sshd
-# ============================================================
+# Validar config temporal antes de tocar la real
+Write-Step "Validando configuración temporal de sshd"
 
-Write-Host "Validando sshd_config..." -ForegroundColor Yellow
-
-if (-not (Test-Path $SshdExe)) {
-    throw "No se encontro sshd.exe en $SshdExe"
-}
-
-& $SshdExe -t
-
+& $SshdExe -t -f $TempConfig
 if ($LASTEXITCODE -ne 0) {
-    Copy-Item $Backup $SshdConfig -Force
-    throw "sshd_config invalido. Se restauro el backup: $Backup"
+    Remove-Item $TempConfig -Force -ErrorAction SilentlyContinue
+    throw "La configuración temporal de sshd no es válida. No se modificó sshd_config real."
 }
 
+Write-Ok "Configuración temporal válida"
+
+# Backup y reemplazo
+if (Test-Path $SshdConfig) {
+    $Backup = "$SshdConfig.bak_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+    Copy-Item -Path $SshdConfig -Destination $Backup -Force
+    Write-Ok "Backup creado: $Backup"
+}
+else {
+    New-Item -ItemType File -Path $SshdConfig -Force | Out-Null
+    $Backup = $null
+}
+
+Copy-Item -Path $TempConfig -Destination $SshdConfig -Force
+Remove-Item $TempConfig -Force -ErrorAction SilentlyContinue
+
+# Validar config real
+Write-Step "Validando sshd_config real"
+
+& $SshdExe -t -f $SshdConfig
+if ($LASTEXITCODE -ne 0) {
+    if ($Backup -and (Test-Path $Backup)) {
+        Copy-Item -Path $Backup -Destination $SshdConfig -Force
+        throw "sshd_config real falló validación. Se restauró el backup: $Backup"
+    }
+
+    throw "sshd_config real falló validación y no había backup disponible."
+}
+
+Write-Ok "sshd_config real válido"
+
 # ============================================================
-# 12. Reiniciar sshd
+# 8. Configurar servicio sshd
 # ============================================================
 
-Write-Host "Reiniciando sshd..." -ForegroundColor Yellow
-Restart-Service sshd
+Write-Step "Configurando servicio sshd"
+
+$service = Get-Service -Name sshd -ErrorAction SilentlyContinue
+
+if ($null -eq $service) {
+    throw "El servicio sshd no existe aunque OpenSSH Server parece instalado. Revisa instalación de OpenSSH."
+}
+
+Set-Service -Name sshd -StartupType Automatic
+
+Write-Ok "Servicio sshd configurado como automático"
 
 # ============================================================
-# 13. Verificación final
+# 9. Configurar firewall
+# ============================================================
+
+Write-Step "Configurando firewall"
+
+$existingRule = Get-NetFirewallRule -Name $FirewallRuleName -ErrorAction SilentlyContinue
+
+if ($null -ne $existingRule) {
+    Remove-NetFirewallRule -Name $FirewallRuleName
+}
+
+New-NetFirewallRule `
+    -Name $FirewallRuleName `
+    -DisplayName "OpenSSH Server (sshd)" `
+    -Enabled True `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort $Port `
+    -RemoteAddress $AllowedRemoteAddress `
+    -Action Allow | Out-Null
+
+Write-Ok "Firewall configurado para puerto $Port desde: $($AllowedRemoteAddress -join ', ')"
+
+# ============================================================
+# 10. Reiniciar sshd
+# ============================================================
+
+Write-Step "Reiniciando sshd"
+
+try {
+    Restart-Service -Name sshd -Force -ErrorAction Stop
+}
+catch {
+    Write-Warn "No se pudo reiniciar sshd directamente. Intentando iniciar el servicio..."
+    Start-Service -Name sshd -ErrorAction Stop
+}
+
+Start-Sleep -Seconds 2
+
+$service = Get-Service -Name sshd
+
+if ($service.Status -ne "Running") {
+    throw "El servicio sshd no quedó en estado Running. Estado actual: $($service.Status)"
+}
+
+Write-Ok "Servicio sshd ejecutándose"
+
+# ============================================================
+# 11. Pruebas locales
+# ============================================================
+
+Write-Step "Probando puerto local"
+
+$test = Test-NetConnection -ComputerName "127.0.0.1" -Port $Port -WarningAction SilentlyContinue
+
+if (-not $test.TcpTestSucceeded) {
+    throw "sshd está iniciado, pero el puerto $Port no responde localmente."
+}
+
+Write-Ok "Puerto $Port responde localmente"
+
+# ============================================================
+# 12. Resumen final
 # ============================================================
 
 Write-Host ""
-Write-Host "OpenSSH configurado correctamente." -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host " OpenSSH Server configurado correctamente" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 
-Write-Host "Usuario Windows para conectar:" -ForegroundColor Cyan
-Write-Host $UserName
+Write-Host "Equipo:" -ForegroundColor Cyan
+Write-Host "  $env:COMPUTERNAME"
+
 Write-Host ""
+Write-Host "Usuario sugerido para conectar:" -ForegroundColor Cyan
+Write-Host "  $TargetUser"
 
-Write-Host "Grupos del usuario actual:" -ForegroundColor Cyan
-whoami /groups | findstr /i "Administradores Administrators"
 Write-Host ""
+Write-Host "Puerto SSH:" -ForegroundColor Cyan
+Write-Host "  $Port"
 
-Write-Host "Permisos finales de administrators_authorized_keys:" -ForegroundColor Cyan
-icacls $AdminKeys
 Write-Host ""
+Write-Host "Firewall permite origen:" -ForegroundColor Cyan
+Write-Host "  $($AllowedRemoteAddress -join ', ')"
 
-Write-Host "Servicio sshd:" -ForegroundColor Cyan
-Get-Service sshd | Format-Table Name, Status, StartType -AutoSize
+Write-Host ""
+Write-Host "Archivo de llaves administradores:" -ForegroundColor Cyan
+Write-Host "  $AdminKeys"
 
+if ($AlsoConfigureUserAuthorizedKeys) {
+    Write-Host ""
+    Write-Host "Archivo de llaves del usuario:" -ForegroundColor Cyan
+    Write-Host "  $UserKeys"
+}
+
+Write-Host ""
 Write-Host "IPs IPv4 detectadas:" -ForegroundColor Cyan
+
 Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object {
         $_.IPAddress -notlike "127.*" -and
@@ -250,5 +517,13 @@ Get-NetIPAddress -AddressFamily IPv4 |
     Format-Table -AutoSize
 
 Write-Host ""
-Write-Host "Desde tu Mac prueba:" -ForegroundColor Green
-Write-Host "ssh -o IdentitiesOnly=yes -i ~/Programming/PanelDeControlCubo/Servicios/id_rsa $UserName@IP_DE_ESTA_VM"
+Write-Host "Desde tu Mac prueba con:" -ForegroundColor Green
+Write-Host "ssh -vvv -o IdentitiesOnly=yes -i ~/Programming/PanelDeControlCubo/Servicios/id_rsa $TargetUser@IP_DEL_SERVIDOR -p $Port"
+
+Write-Host ""
+Write-Host "Permisos de administrators_authorized_keys:" -ForegroundColor Cyan
+icacls $AdminKeys
+
+Write-Host ""
+Write-Host "Servicio sshd:" -ForegroundColor Cyan
+Get-Service sshd | Format-Table Name, Status, StartType -AutoSize
