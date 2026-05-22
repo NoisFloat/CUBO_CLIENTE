@@ -36,9 +36,7 @@ $ErrorActionPreference = "Stop"
 # 1. PEGA AQUÍ TU LLAVE PÚBLICA COMPLETA
 # ============================================================
 
-$PublicKey = @"
-ssh-ed25519 PEGA_AQUI_TU_LLAVE_PUBLICA_COMPLETA
-"@.Trim()
+$PublicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCldfTtTpVsOwrjRTy66O0JZ4M9ihSr/FzFC7iGj7fG4Fayku6+/jsdCWqOabnycm3kcQJcM03RsK4EOZF4cd2DPQj6kpn4qVEojsdjc+AwoZlwZ5BBusAkgo/r4MJkj3YTzKaejGsejHooNe6Nv57lJq7BN6DzpXyHmi8Uqwel0EX4+qRevB7v5bbXYuLGgmFUWe7nclhlTKFPg0JhJT8a5QSR/KvSrwUvqEbVKFBFs3txgMhda6HkH+S4DBdkE0T+0ahm0j0Ti0bnqmH5+fskYQnWLhSYO3pghAiPpKp73Co4Z7zmAqdewDAe47hQ72k8oggy6P/ifMX7jmfYPO2fRoUTOW0WL3t1BBmEE6wn5HjY+UOSq2HE7basyU3wnly9t/6glehnmMQFn1uG/DOPoIM2GdoXl1/wKF0P7z+KEZjup7QzYuzvKQdhPnysCFxpCO/vfgOJqWwotUuT+KdtTSuEsHLieefTxWggqZ9UuXzVQEB9WOhvVBH+1TMiJEWBnENV5ru+yUI+hQllcGU3vDYPBmLjrtGzdTP1TNdufI+NquSR6GRMT2vdkEkQIkwz3UX9/06iaPMNKq56SfFSRW6K/kxU7FuWDJGXy1Hi9+jlSoau8mMUcN/7y6uvEU3dGDhQKoLuPE6cdAcCOEiTHT0ygmLAtf6RpROCCkxv+Q=="
 
 # ============================================================
 # 2. VARIABLES
