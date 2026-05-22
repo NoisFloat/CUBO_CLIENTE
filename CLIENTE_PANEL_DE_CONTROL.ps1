@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 # ssh-keygen -y -f ~/Programming/PanelDeControlCubo/Servicios/id_rsa
 # ============================================================
 
-$PublicKey = ""
+$PublicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCquPxv3J0kvfUFaTI7muUV5ovGSOk8YVdsKUU3KcW8ZiNU/hQag1p2/oFEZlTxum8oPhKIYdwRL/t12Y+IJrYwlKDyxHGA8zJ9z7JL5YXkn9k3T+j7ArkxJh6Mv45EMb0Cx/td07mS2FtLGwjX1i/E3s/0pAxriiBlcX+8VqcMp6WGCnIRDVeCCOr8APp3ZvWuxL5bj1NIBuPsAL7vVDW2eL9mWIu64AvzI0tFFaraFv4iDSzzcJefreKLj0lnYnaGWfe/Ev7hN7h/S9HsTXlIcOJhGRETvwGDymwdSbmwj61KD3N6OEsRHJ2zb6+Zx5v7X7tU+69Ah06CQNHFSd4Ik1KKjoRUiXrkZe0Jkaq07Qx8bnFVCKMC8HiXTyOIH7IptuvI5j4cz8F3E5VVYUyUEGpJUA9xmJvoMFQX1joLyvZM2GF7MtpONfPmM15tKFcCd3QrRWWqfOx9tNaQPWDiyjY2hkO8NtAAvk/xp72cYJTrj7jCAE8KvxVtdZPxOjw6PZEhK88Oarg9j+yp87xVkvPYe2QgbHjD4nkB2jdxVM9iBYJVjO/SeUbb32V3MlD6uZLLfw0dlZJBYCH8PiFSQ8gJwqfMUvfGxx96D3TeL7BZbYMd/S/Mv9WR6qnnVUqBSUxXXUTtPsEUo5GsDnfje+kBa8WNbJ1ZHk/rv6uPeQ=="
 
 # ============================================================
 # 2. Validar que el script corre como Administrador
