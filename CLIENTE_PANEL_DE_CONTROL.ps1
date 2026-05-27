@@ -64,9 +64,9 @@ $SshdConfig = Join-Path $SshDir "sshd_config"
 
 $AdminKeys = Join-Path $SshDir "administrators_authorized_keys"
 
-$SshdExe = Join-Path $WindowsDir "System32\OpenSSH\sshd.exe"
+$SshdExe = Join-Path $OpenSshInstallDir "sshd.exe"
 
-$SshKeygenExe = Join-Path $WindowsDir "System32\OpenSSH\ssh-keygen.exe"
+$SshKeygenExe = Join-Path $OpenSshInstallDir "ssh-keygen.exe"
 
 $UserSshDir = Join-Path $UserProfile ".ssh"
 
@@ -125,21 +125,23 @@ Write-Host "OK: llave pública validada." -ForegroundColor Green
 # 5. INSTALAR OPENSSH SERVER
 # ============================================================
 
-Write-Host "Verificando OpenSSH Server..." -ForegroundColor Yellow
+Write-Host "Verificando OpenSSH instalado por MSI..." -ForegroundColor Yellow
 
-$ServerCapability = Get-WindowsCapability -Online | Where-Object { $_.Name -like "OpenSSH.Server*" } | Select-Object -First 1
+$PossibleOpenSshDirs = @(
+    "C:\Program Files\OpenSSH",
+    "C:\Program Files\OpenSSH-Win64",
+    "C:\Program Files (x86)\OpenSSH"
+)
 
-if ($null -eq $ServerCapability) {
-    throw "No se encontró la característica OpenSSH.Server en Windows."
+$OpenSshInstallDir = $PossibleOpenSshDirs | Where-Object {
+    Test-Path (Join-Path $_ "sshd.exe")
+} | Select-Object -First 1
+
+if (-not $OpenSshInstallDir) {
+    throw "No se encontró sshd.exe. Instala primero Win32-OpenSSH MSI."
 }
 
-if ($ServerCapability.State -ne "Installed") {
-    Write-Host "Instalando OpenSSH Server..." -ForegroundColor Yellow
-    Add-WindowsCapability -Online -Name $ServerCapability.Name | Out-Null
-    Write-Host "OK: OpenSSH Server instalado." -ForegroundColor Green
-} else {
-    Write-Host "OK: OpenSSH Server ya estaba instalado." -ForegroundColor Green
-}
+Write-Host "OK: OpenSSH MSI encontrado en $OpenSshInstallDir" -ForegroundColor Green
 
 # ============================================================
 # 6. CREAR CARPETAS
